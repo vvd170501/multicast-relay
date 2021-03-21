@@ -172,6 +172,7 @@ class PacketRelay():
     MDNS_MCAST_PORT   = 5353
     MAGIC             = b'MRLY'
     IPV4LEN           = len(socket.inet_aton('0.0.0.0'))
+    NULL_MAC = binascii.unhexlify('00:00:00:00:00:00'.replace(':', ''))
 
     def __init__(self, interfaces, noTransmitInterfaces, ifFilter, waitForIP, ttl,
                  oneInterface, homebrewNetifaces, ifNameStructLen, allowNonEther,
@@ -469,7 +470,7 @@ class PacketRelay():
             ipPacket = self.computeIPChecksum(ipHeader + udpHeader + dataFragment, ipHeaderLength)
 
             try:
-                if srcMac != binascii.unhexlify('00:00:00:00:00:00'.replace(':', '')):
+                if srcMac != PacketRelay.NULL_MAC and destMac != PacketRelay.NULL_MAC:
                     etherPacket = destMac + srcMac + self.etherType + ipPacket
                     sock.send(etherPacket)
                 else:
@@ -626,39 +627,31 @@ class PacketRelay():
                     if self.ssdpUnicastAddr:
                         dstAddr = recentSsdpSearchSrc['addr']
                         dstPort = recentSsdpSearchSrc['port']
-                        self.logger.info('Received SSDP Unicast - received from %s:%d on %s:%d, need to relay to %s:%d' % (origSrcAddr, origSrcPort, origDstAddr, origDstPort, dstAddr, dstPort))
                         data = PacketRelay.modifyUdpPacket(data, ipHeaderLength, dstAddr=dstAddr, dstPort=dstPort)
+                    else:
+                        origDstAddr = PacketRelay.REMOTE_SSDP_ADDR  # NOTE maybe there is a better solution
+                        origDstPort = PacketRelay.REMOTE_SSDP_PORT
+                    self.logger.info('Received SSDP Unicast - received from %s:%d on %s:%d, need to relay to %s:%d' % (origSrcAddr, origSrcPort, origDstAddr, origDstPort, dstAddr, dstPort))
 
-                        if recentSsdpSearchSrc['interface'] == 'local':
+                    if self.ssdpUnicastAddr and recentSsdpSearchSrc['interface'] != 'local':
+                        destMac = 0
+                    else:
+                        mac = PacketRelay.unicastIpToMac(dstAddr)
+                        if mac is None:
+                            destMac = 0
+                        else:
                             try:
-                                destMac = binascii.unhexlify(PacketRelay.unicastIpToMac(dstAddr).replace(':', ''))
+                                destMac = binascii.unhexlify(mac.replace(':', ''))
                             except Exception as e:
                                 self.logger.info('DEBUG: exception while resolving mac of IP %s: %s' % (dstAddr, str(e)))
                                 continue
 
-                            # It's possible (though unlikely) we can't resolve the MAC if it's unicast.
-                            # In that case, we can't relay the packet.
-                            if not destMac:
-                                self.logger.info('DEBUG: could not resolve mac for %s' % dstAddr)
-                                continue
-                        else:
-                            destMac = 0
-                    else:
-                        self.logger.info('Received SSDP Unicast - received from %s:%d on %s:%d, need to relay to %s:%d' % (origSrcAddr, origSrcPort, origDstAddr, origDstPort, dstAddr, dstPort))
-                        origDstAddr = PacketRelay.REMOTE_SSDP_ADDR  # NOTE maybe there is a better solution
-                        origDstPort = PacketRelay.REMOTE_SSDP_PORT
-
-                        try:
-                            destMac = binascii.unhexlify(PacketRelay.unicastIpToMac(dstAddr).replace(':', ''))
-                        except Exception as e:
-                            self.logger.info('DEBUG: exception while resolving mac of IP %s: %s' % (dstAddr, str(e)))
-                            continue
-
                         # It's possible (though unlikely) we can't resolve the MAC if it's unicast.
                         # In that case, we can't relay the packet.
-                        if not destMac:
-                            self.logger.info('DEBUG: could not resolve mac for %s' % dstAddr)
-                            continue
+                        # NOTE Works fine with wireguard but may possibly break with other interface types
+#                       if not destMac:
+#                           self.logger.info('DEBUG: could not resolve mac for %s' % dstAddr)
+#                           continue
 
                 if self.remoteSockets() and not (receivingInterface == 'remote' and self.noRemoteRelay) and srcAddr != self.ssdpUnicastAddr:
                     packet = self.aes.encrypt(self.MAGIC + socket.inet_aton(addr) + data)
@@ -716,7 +709,7 @@ class PacketRelay():
                         data = data[:16] + socket.inet_aton(tx['broadcast']) + data[20:]
 
                     if origDstAddr == tx['relay']['addr'] and origDstPort == tx['relay']['port'] and (self.oneInterface or not self.onNetwork(addr, tx['addr'], tx['netmask'])):
-                        destMac = destMac if destMac else self.etherAddrs[dstAddr]
+                        destMac = destMac if destMac else self.etherAddrs.get(dstAddr, PacketRelay.NULL_MAC)
 
                         if tx['interface'] in self.masquerade:
                             data = data[:12] + socket.inet_aton(tx['addr']) + data[16:]
